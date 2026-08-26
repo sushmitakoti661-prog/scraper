@@ -5,11 +5,34 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 from datetime import datetime, timezone
 
+from pydantic import BaseModel, HttpUrl, ValidationError
+from typing import Optional
+
+class BookRecord(BaseModel):
+    title: str
+    product_url: HttpUrl
+    price_text: str
+    price_gbp: float
+    availability_text: str
+    rating_text: str
+    description: Optional[str] = None
+    source_page: HttpUrl
+    fetched_at: str
+
 # Politeness settings
 USER_AGENT = "FlyRankInternshipA9/1.0 (+https://github.com/YOUR-USERNAME/scraper)"
 TIMEOUT = 10  # seconds
 CACHE_DIR = Path("cache")
 
+import re
+
+def clean_price(price_text):
+    """
+    Turns "£51.77" into 51.77 (a float).
+    """
+    # Remove everything except digits and the decimal point
+    cleaned = re.sub(r"[^\d.]", "", price_text)
+    return float(cleaned)
 
 def fetch_page(url, cache_filename):
     """
@@ -106,6 +129,35 @@ def extract_book_details(html, product_url, source_page):
         "fetched_at": datetime.now(timezone.utc).isoformat()
     }
 
+import json
+
+def clean_and_validate(raw_records):
+    """
+    Cleans each raw record (adds price_gbp), then validates it against
+    the BookRecord schema. Good records and bad records are separated.
+    """
+    valid_records = []
+    error_records = []
+
+    for raw in raw_records:
+        try:
+            # Add the cleaned price field
+            raw["price_gbp"] = clean_price(raw["price_text"])
+
+            # Validate against our schema
+            validated = BookRecord(**raw)
+
+            # Convert back to a plain dict for JSON storage
+            valid_records.append(json.loads(validated.model_dump_json()))
+
+        except (ValidationError, ValueError) as e:
+            error_records.append({
+                "record": raw,
+                "reason": str(e)
+            })
+
+    return valid_records, error_records
+
 def discover_all_book_links():
     """
     Starts at catalogue page 1, follows "next" links, and collects
@@ -160,8 +212,24 @@ def scrape_all_books():
     print(f"detail_pages={len(all_records)}")
     return all_records
 
+def save_output(valid_records, error_records):
+    """
+    Writes valid records to output/books.json and any bad ones to
+    output/errors.json.
+    """
+    output_dir = Path("output")
+    output_dir.mkdir(exist_ok=True)
+
+    with open(output_dir / "books.json", "w", encoding="utf-8") as f:
+        json.dump(valid_records, f, indent=2, ensure_ascii=False)
+
+    with open(output_dir / "errors.json", "w", encoding="utf-8") as f:
+        json.dump(error_records, f, indent=2, ensure_ascii=False)
+
+    print(f"valid_records={len(valid_records)}")
+    print(f"error_records={len(error_records)}")
 
 if __name__ == "__main__":
-    records = scrape_all_books()
-    # print just the first record so we can eyeball it
-    print(records[0])
+    raw_records = scrape_all_books()
+    valid_records, error_records = clean_and_validate(raw_records)
+    save_output(valid_records, error_records)
